@@ -247,11 +247,25 @@ export default function App() {
     initAuth();
   }, []);
 
+  // Apakah sudah ada minimal 1 akun terdaftar di sistem (jika sudah ada, kunci pendaftaran publik di halaman login)
+  const hasRegisteredAccounts = stafList.length > 0;
+
+  useEffect(() => {
+    if (hasRegisteredAccounts && authMode === 'register_first') {
+      setAuthMode('login');
+    }
+  }, [hasRegisteredAccounts, authMode]);
+
   // Handle Login atau Register Akun Pertama
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
     if (!loginEmail.trim() || !loginPassword.trim()) {
       showToast('Email dan Password wajib diisi.', 'error');
+      return;
+    }
+    if (authMode === 'register_first' && hasRegisteredAccounts) {
+      showToast('Pendaftaran publik sudah ditutup. Hubungi Admin untuk membuat akun.', 'error');
+      setAuthMode('login');
       return;
     }
 
@@ -880,30 +894,41 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex rounded-xl bg-slate-100 p-1 mb-5">
-            <button
-              type="button"
-              onClick={() => setAuthMode('login')}
-              className={`flex-1 py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
-                authMode === 'login'
-                  ? 'bg-white text-slate-900 shadow-xs'
-                  : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              Masuk (Login Staf)
-            </button>
-            <button
-              type="button"
-              onClick={() => setAuthMode('register_first')}
-              className={`flex-1 py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
-                authMode === 'register_first'
-                  ? 'bg-white text-slate-900 shadow-xs'
-                  : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              Daftar Akun Baru
-            </button>
-          </div>
+          {!hasRegisteredAccounts ? (
+            <div className="flex rounded-xl bg-slate-100 p-1 mb-5">
+              <button
+                type="button"
+                onClick={() => setAuthMode('login')}
+                className={`flex-1 py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                  authMode === 'login'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                Masuk (Login Staf)
+              </button>
+              <button
+                type="button"
+                onClick={() => setAuthMode('register_first')}
+                className={`flex-1 py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                  authMode === 'register_first'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                Setup Akun Admin Pertama
+              </button>
+            </div>
+          ) : (
+            <div className="mb-5 pb-3 border-b border-slate-100">
+              <span className="text-xs font-semibold text-slate-700">
+                Masuk dengan Akun Staf Terdaftar
+              </span>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Penambahan akun staf baru hanya dapat dilakukan dari dalam aplikasi oleh Admin/Staf.
+              </p>
+            </div>
+          )}
 
           <form onSubmit={handleAuthSubmit} className="space-y-4">
             {authMode === 'register_first' && (
