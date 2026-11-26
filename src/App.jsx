@@ -250,6 +250,15 @@ export default function App() {
   // Apakah sudah ada minimal 1 akun terdaftar di sistem (jika sudah ada, kunci pendaftaran publik di halaman login)
   const hasRegisteredAccounts = stafList.length > 0;
 
+  // Cek apakah user yang login adalah Admin (akun pertama yang terdaftar atau jabatannya mengandung kata Admin / Kepala)
+  const isAdminUser = useMemo(() => {
+    if (!currentUser) return false;
+    if (stafList.length > 0 && stafList[0].id === currentUser.id) return true;
+    const jab = (currentUser.jabatan || '').toLowerCase();
+    const mail = (currentUser.email || '').toLowerCase();
+    return jab.includes('admin') || jab.includes('kepala') || mail.startsWith('admin');
+  }, [currentUser, stafList]);
+
   useEffect(() => {
     if (hasRegisteredAccounts && authMode === 'register_first') {
       setAuthMode('login');
@@ -1003,21 +1012,23 @@ export default function App() {
             </button>
           </form>
 
-          <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-            <span>
-              Status DB:{' '}
-              <strong className={isSupabaseConnected ? 'text-emerald-600' : 'text-amber-600'}>
-                {isSupabaseConnected ? 'Supabase Online' : 'Simulasi Lokal'}
-              </strong>
-            </span>
-            <button
-              type="button"
-              onClick={() => setShowConfigModal(true)}
-              className="text-sky-600 hover:underline font-medium"
-            >
-              Atur Koneksi Supabase
-            </button>
-          </div>
+          {(!isSupabaseConnected || !hasRegisteredAccounts) && (
+            <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+              <span>
+                Status DB:{' '}
+                <strong className={isSupabaseConnected ? 'text-emerald-600' : 'text-amber-600'}>
+                  {isSupabaseConnected ? 'Supabase Online' : 'Simulasi Lokal'}
+                </strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowConfigModal(true)}
+                className="text-sky-600 hover:underline font-medium"
+              >
+                Atur Koneksi Supabase
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Modal Pengaturan Koneksi Supabase di Halaman Login */}
@@ -1132,20 +1143,22 @@ export default function App() {
               </div>
             )}
 
-            <button
-              onClick={() => setShowConfigModal(true)}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition ${
-                isSupabaseConnected
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
-                  : 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
-              }`}
-              title="Pengaturan Database Supabase"
-            >
-              <Database className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">
-                {isSupabaseConnected ? 'Supabase' : 'Simulasi'}
-              </span>
-            </button>
+            {isAdminUser && (
+              <button
+                onClick={() => setShowConfigModal(true)}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition ${
+                  isSupabaseConnected
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
+                    : 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
+                }`}
+                title="Pengaturan Database Supabase (Khusus Admin)"
+              >
+                <Database className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">
+                  {isSupabaseConnected ? 'Supabase' : 'Simulasi'}
+                </span>
+              </button>
+            )}
 
             <button
               onClick={handleLogout}
