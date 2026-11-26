@@ -21,17 +21,25 @@ import {
   X,
   ExternalLink,
   Link2,
+  Users,
+  LogOut,
+  UserCheck,
+  Lock,
+  UserPlus,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
 import {
   getSupabaseClient,
   getSupabaseConfig,
   saveSupabaseConfig,
+  createTempAuthClient,
 } from './utils/supabaseClient';
 import {
   loadLocalJenis,
   saveLocalJenis,
   loadLocalSurat,
+  loadLocalStaf,
+  saveLocalStaf,
   simulatePostgresInsertSurat,
   setLocalTemplateBinary,
   getLocalTemplateBinary,
@@ -46,13 +54,24 @@ import {
 } from './utils/docxEngine';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('buat'); // 'buat' | 'agenda' | 'master'
+  const [activeTab, setActiveTab] = useState('buat'); // 'buat' | 'agenda' | 'master' | 'staf'
   const [jenisList, setJenisList] = useState([]);
   const [suratList, setSuratList] = useState([]);
+  const [stafList, setStafList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [isSupabaseConnected, setIsSupabaseConnected] = useState(false);
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [toast, setToast] = useState(null);
+
+  // Auth State
+  const [currentUser, setCurrentUser] = useState(null); // { id, email, nama_lengkap, jabatan }
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register_first'
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginNama, setLoginNama] = useState('');
+  const [loginJabatan, setLoginJabatan] = useState('Staf Tata Usaha');
+  const [authLoading, setAuthLoading] = useState(false);
 
   // Supabase config modal state
   const [sbUrl, setSbUrl] = useState('');
@@ -75,10 +94,17 @@ export default function App() {
   const [filterJenis, setFilterJenis] = useState('ALL');
 
   // Form Master Jenis Surat (Tambah/Edit)
-  const [editingJenis, setEditingJenis] = useState(null); // null or object
+  const [editingJenis, setEditingJenis] = useState(null);
   const [formKode, setFormKode] = useState('');
   const [formNama, setFormNama] = useState('');
   const [formVarsText, setFormVarsText] = useState('');
+
+  // Form Tab 4: Daftar Akun Staf
+  const [stafNama, setStafNama] = useState('');
+  const [stafEmail, setStafEmail] = useState('');
+  const [stafPassword, setStafPassword] = useState('');
+  const [stafJabatan, setStafJabatan] = useState('Staf Tata Usaha');
+  const [stafSubmitting, setStafSubmitting] = useState(false);
 
   // Modal Link Google Drive Arsip PDF
   const [editingLinkRow, setEditingLinkRow] = useState(null);
@@ -89,21 +115,80 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Load profil staf aktif dari user Supabase
+  const resolveUserProfile = async (client, sbUser) => {
+    if (!sbUser) {
+      setCurrentUser(null);
+      return;
+    }
+    try {
+      const { data: prof } = await client
+        .from('profil_staf')
+        .select('*')
+        .eq('id', sbUser.id)
+        .maybeSingle();
+
+      const nama =
+        prof?.nama_lengkap ||
+        sbUser.user_metadata?.nama_lengkap ||
+        sbUser.email?.split('@')[0] ||
+        'Staf TU';
+      const jabatan =
+        prof?.jabatan || sbUser.user_metadata?.jabatan || 'Staf Tata Usaha';
+
+      // Jika belum tercatat di tabel profil_staf, catat otomatis
+      if (!prof) {
+        await client.from('profil_staf').upsert([
+          {
+            id: sbUser.id,
+            email: sbUser.email,
+            nama_lengkap: nama,
+            jabatan,
+            aktif: true,
+          },
+        ]);
+      }
+
+      setCurrentUser({
+        id: sbUser.id,
+        email: sbUser.email,
+        nama_lengkap: nama,
+        jabatan,
+      });
+    } catch {
+      setCurrentUser({
+        id: sbUser.id,
+        email: sbUser.email,
+        nama_lengkap: sbUser.user_metadata?.nama_lengkap || sbUser.email,
+        jabatan: 'Staf Tata Usaha',
+      });
+    }
+  };
+
   // Load initial config & data
   const fetchAllData = async () => {
     setLoading(true);
     const client = getSupabaseClient();
     if (client) {
       try {
-        const [{ data: jData, error: jErr }, { data: sData, error: sErr }] =
-          await Promise.all([
-            client.from('jenis_surat').select('*').order('created_at', { ascending: true }),
-            client.from('surat_keluar').select('*').order('tahun', { ascending: false }).order('nomor_urut', { ascending: false }),
-          ]);
+        const [
+          { data: jData, error: jErr },
+          { data: sData, error: sErr },
+          { data: pData },
+        ] = await Promise.all([
+          client.from('jenis_surat').select('*').order('created_at', { ascending: true }),
+          client
+            .from('surat_keluar')
+            .select('*')
+            .order('tahun', { ascending: false })
+            .order('nomor_urut', { ascending: false }),
+          client.from('profil_staf').select('*').order('created_at', { ascending: true }),
+        ]);
         if (jErr) throw jErr;
         if (sErr) throw sErr;
         setJenisList(jData || []);
         setSuratList(sData || []);
+        setStafList(pData || []);
         setIsSupabaseConnected(true);
         if (jData?.length > 0 && !jData.some((j) => j.kode === kodeJenis && j.aktif)) {
           const firstActive = jData.find((j) => j.aktif);
@@ -115,21 +200,247 @@ export default function App() {
         setIsSupabaseConnected(false);
         setJenisList(loadLocalJenis());
         setSuratList(loadLocalSurat());
+        setStafList(loadLocalStaf());
       }
     } else {
       setIsSupabaseConnected(false);
       setJenisList(loadLocalJenis());
       setSuratList(loadLocalSurat());
+      setStafList(loadLocalStaf());
     }
     setLoading(false);
   };
 
+  // Check session on startup
   useEffect(() => {
     const cfg = getSupabaseConfig();
     setSbUrl(cfg.url);
     setSbAnon(cfg.anonKey);
-    fetchAllData();
+
+    const initAuth = async () => {
+      setAuthChecking(true);
+      const client = getSupabaseClient();
+      if (client) {
+        try {
+          const {
+            data: { session },
+          } = await client.auth.getSession();
+          if (session?.user) {
+            await resolveUserProfile(client, session.user);
+          } else {
+            setCurrentUser(null);
+          }
+        } catch {
+          setCurrentUser(null);
+        }
+      } else {
+        // Mode simulasi lokal: cek apakah sudah login lokal
+        const savedLocalUser = localStorage.getItem('smk_mn_local_user');
+        if (savedLocalUser) {
+          setCurrentUser(JSON.parse(savedLocalUser));
+        }
+      }
+      await fetchAllData();
+      setAuthChecking(false);
+    };
+
+    initAuth();
   }, []);
+
+  // Handle Login atau Register Akun Pertama
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    if (!loginEmail.trim() || !loginPassword.trim()) {
+      showToast('Email dan Password wajib diisi.', 'error');
+      return;
+    }
+
+    setAuthLoading(true);
+    try {
+      const client = getSupabaseClient();
+      if (client && isSupabaseConnected) {
+        if (authMode === 'login') {
+          const { data, error } = await client.auth.signInWithPassword({
+            email: loginEmail.trim(),
+            password: loginPassword,
+          });
+          if (error) throw error;
+          await resolveUserProfile(client, data.user);
+          await fetchAllData();
+          showToast('Berhasil masuk!');
+        } else {
+          if (!loginNama.trim()) {
+            throw new Error('Nama Lengkap wajib diisi untuk membuat akun.');
+          }
+          const { data, error } = await client.auth.signUp({
+            email: loginEmail.trim(),
+            password: loginPassword,
+            options: {
+              data: {
+                nama_lengkap: loginNama.trim(),
+                jabatan: loginJabatan.trim() || 'Staf Tata Usaha',
+              },
+            },
+          });
+          if (error) throw error;
+
+          if (data.user) {
+            await client.from('profil_staf').upsert([
+              {
+                id: data.user.id,
+                email: loginEmail.trim(),
+                nama_lengkap: loginNama.trim(),
+                jabatan: loginJabatan.trim() || 'Staf Tata Usaha',
+                aktif: true,
+              },
+            ]);
+          }
+
+          if (data.session) {
+            await resolveUserProfile(client, data.user);
+            await fetchAllData();
+            showToast('Akun staf berhasil dibuat & langsung login!');
+          } else {
+            showToast(
+              'Akun berhasil didaftarkan! Jika diminta konfirmasi email, matikan "Confirm Email" di Supabase Auth -> Providers -> Email.'
+            );
+            setAuthMode('login');
+          }
+        }
+      } else {
+        // Login di Mode Simulasi Lokal
+        const list = loadLocalStaf();
+        let found = list.find(
+          (u) => u.email.toLowerCase() === loginEmail.trim().toLowerCase()
+        );
+        if (!found) {
+          found = {
+            id: crypto.randomUUID(),
+            email: loginEmail.trim(),
+            nama_lengkap: loginNama.trim() || loginEmail.split('@')[0],
+            jabatan: loginJabatan || 'Staf Tata Usaha',
+            aktif: true,
+            created_at: new Date().toISOString(),
+          };
+          saveLocalStaf([...list, found]);
+        }
+        localStorage.setItem('smk_mn_local_user', JSON.stringify(found));
+        setCurrentUser(found);
+        await fetchAllData();
+        showToast(`Masuk sebagai ${found.nama_lengkap} (Mode Simulasi)`);
+      }
+    } catch (err) {
+      showToast(`Gagal autentikasi: ${err.message}`, 'error');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // Handle Logout
+  const handleLogout = async () => {
+    const client = getSupabaseClient();
+    if (client) {
+      await client.auth.signOut();
+    }
+    localStorage.removeItem('smk_mn_local_user');
+    setCurrentUser(null);
+    showToast('Anda telah keluar.');
+  };
+
+  // Tambah Akun Staf Baru dari Tab 4 (Tanpa mengeluarkan sesi Admin yang sedang login)
+  const handleAddStafAccount = async (e) => {
+    e.preventDefault();
+    if (!stafNama.trim() || !stafEmail.trim() || !stafPassword.trim()) {
+      showToast('Nama Lengkap, Email, dan Password wajib diisi!', 'error');
+      return;
+    }
+    if (stafPassword.length < 6) {
+      showToast('Password minimal 6 karakter.', 'error');
+      return;
+    }
+
+    setStafSubmitting(true);
+    try {
+      const tempClient = createTempAuthClient();
+      const mainClient = getSupabaseClient();
+
+      if (tempClient && mainClient && isSupabaseConnected) {
+        const { data, error } = await tempClient.auth.signUp({
+          email: stafEmail.trim(),
+          password: stafPassword,
+          options: {
+            data: {
+              nama_lengkap: stafNama.trim(),
+              jabatan: stafJabatan.trim() || 'Staf Tata Usaha',
+            },
+          },
+        });
+        if (error) throw error;
+
+        if (data?.user) {
+          const { error: profErr } = await mainClient.from('profil_staf').upsert([
+            {
+              id: data.user.id,
+              email: stafEmail.trim(),
+              nama_lengkap: stafNama.trim(),
+              jabatan: stafJabatan.trim() || 'Staf Tata Usaha',
+              aktif: true,
+            },
+          ]);
+          if (profErr) throw profErr;
+        }
+
+        showToast(`Akun staf "${stafNama}" (${stafEmail}) berhasil didaftarkan!`);
+      } else {
+        const list = loadLocalStaf();
+        if (list.some((s) => s.email.toLowerCase() === stafEmail.trim().toLowerCase())) {
+          throw new Error('Email sudah terdaftar!');
+        }
+        const newStaf = {
+          id: crypto.randomUUID(),
+          email: stafEmail.trim(),
+          nama_lengkap: stafNama.trim(),
+          jabatan: stafJabatan.trim() || 'Staf Tata Usaha',
+          aktif: true,
+          created_at: new Date().toISOString(),
+        };
+        saveLocalStaf([...list, newStaf]);
+        showToast(`Akun staf "${stafNama}" berhasil ditambahkan!`);
+      }
+
+      setStafNama('');
+      setStafEmail('');
+      setStafPassword('');
+      setStafJabatan('Staf Tata Usaha');
+      await fetchAllData();
+    } catch (err) {
+      showToast(`Gagal menambah akun staf: ${err.message}`, 'error');
+    } finally {
+      setStafSubmitting(false);
+    }
+  };
+
+  // Hapus profil staf dari daftar
+  const handleDeleteStaf = async (stafObj) => {
+    if (stafObj.id === currentUser?.id) {
+      showToast('Tidak dapat menghapus akun yang sedang Anda gunakan login.', 'error');
+      return;
+    }
+    try {
+      const client = getSupabaseClient();
+      if (client && isSupabaseConnected) {
+        const { error } = await client.from('profil_staf').delete().eq('id', stafObj.id);
+        if (error) throw error;
+      } else {
+        const updated = loadLocalStaf().filter((s) => s.id !== stafObj.id);
+        saveLocalStaf(updated);
+      }
+      await fetchAllData();
+      showToast(`Staf ${stafObj.nama_lengkap} dihapus dari daftar.`);
+    } catch (err) {
+      showToast(`Gagal menghapus: ${err.message}`, 'error');
+    }
+  };
 
   // Jenis surat yang sedang dipilih pada form Buat Surat
   const selectedJenisObj = useMemo(
@@ -157,13 +468,11 @@ export default function App() {
     return `${nextUrut}/${kodeJenis}/SMK.MN/${sem}/${romawi}/${y}`;
   }, [tanggalSurat, kodeJenis, suratList]);
 
-  // Fungsi ambil ArrayBuffer template .docx (dari Supabase Storage, Local Upload, atau Generator Sample)
+  // Fungsi ambil ArrayBuffer template .docx
   const getTemplateArrayBuffer = async (jenisObj) => {
-    // 1. Cek apakah ada binary template yang diupload di sesi lokal
     const localBin = getLocalTemplateBinary(jenisObj.kode);
     if (localBin) return localBin;
 
-    // 2. Cek apakah ada di Supabase Storage
     const client = getSupabaseClient();
     if (client && jenisObj.template_path && !jenisObj.template_path.startsWith('sample:')) {
       const { data, error } = await client.storage
@@ -174,7 +483,6 @@ export default function App() {
       }
     }
 
-    // 3. Fallback: gunakan sample template .docx bawaan yang valid
     const sampleBlob = generateSampleTemplateBlob(jenisObj);
     return await sampleBlob.arrayBuffer();
   };
@@ -207,9 +515,6 @@ export default function App() {
       const safeNomor = suratRow.nomor_surat_lengkap.replace(/\//g, '-');
       const fileName = `${safeNomor}_${suratRow.perihal.slice(0, 30).replace(/[^a-zA-Z0-9]/g, '_')}.docx`;
 
-      // Catatan Hemat Kuota Supabase Gratis (0 MB Storage untuk surat keluar):
-      // File .docx di-generate langsung di browser dari Master Template + data_variabel JSONB,
-      // sehingga tidak perlu memenuhi Supabase Storage.
       saveAs(outBlob, fileName);
       showToast(`File Word (${fileName}) berhasil di-generate!`);
     } catch (err) {
@@ -218,7 +523,7 @@ export default function App() {
     }
   };
 
-  // Submit Buat Nomor Surat Baru
+  // Submit Buat Nomor Surat Baru (beserta tracking pembuat)
   const handleCreateSurat = async (e) => {
     e.preventDefault();
     if (!kodeJenis || !tanggalSurat || !perihal.trim() || !tujuan.trim()) {
@@ -226,23 +531,32 @@ export default function App() {
       return;
     }
 
+    const pembuatNama = currentUser?.nama_lengkap || currentUser?.email || 'Staf TU';
+
     setLoading(true);
     try {
       let createdRow = null;
       const client = getSupabaseClient();
 
       if (client && isSupabaseConnected) {
+        const payloadInsert = {
+          kode_jenis: kodeJenis,
+          tanggal_surat: tanggalSurat,
+          perihal: perihal.trim(),
+          tujuan: tujuan.trim(),
+          data_variabel: {
+            ...dynamicVars,
+            _pembuat: pembuatNama,
+          },
+          nama_pembuat: pembuatNama,
+        };
+        if (currentUser?.id && !currentUser.id.startsWith('local-')) {
+          payloadInsert.dibuat_oleh = currentUser.id;
+        }
+
         const { data, error } = await client
           .from('surat_keluar')
-          .insert([
-            {
-              kode_jenis: kodeJenis,
-              tanggal_surat: tanggalSurat,
-              perihal: perihal.trim(),
-              tujuan: tujuan.trim(),
-              data_variabel: dynamicVars,
-            },
-          ])
+          .insert([payloadInsert])
           .select()
           .single();
 
@@ -254,7 +568,11 @@ export default function App() {
           tanggal_surat: tanggalSurat,
           perihal: perihal.trim(),
           tujuan: tujuan.trim(),
-          data_variabel: dynamicVars,
+          data_variabel: {
+            ...dynamicVars,
+            _pembuat: pembuatNama,
+          },
+          nama_pembuat: pembuatNama,
         });
       }
 
@@ -266,7 +584,6 @@ export default function App() {
         await handleGenerateDocxFromRow(createdRow);
       }
 
-      // Reset isian form
       setPerihal('');
       setTujuan('');
       setDynamicVars({});
@@ -285,7 +602,6 @@ export default function App() {
       const arrayBuffer = await file.arrayBuffer();
       const detectedVars = extractVariablesFromDocx(arrayBuffer);
 
-      // Simpan ke memory lokal agar langsung bisa dipakai saat ini juga
       setLocalTemplateBinary(jenisObj.kode, arrayBuffer);
 
       let templatePath = `templates/Template_${jenisObj.kode}_${Date.now()}.docx`;
@@ -374,7 +690,6 @@ export default function App() {
               : j
           );
           saveLocalJenis(updated);
-          // Simulasi ON UPDATE CASCADE
           if (oldKode !== newKode) {
             const sList = loadLocalSurat().map((s) =>
               s.kode_jenis === oldKode ? { ...s, kode_jenis: newKode } : s
@@ -432,12 +747,12 @@ export default function App() {
     }
   };
 
-  // Hapus Kode Surat (Jika sudah dipakai di surat_keluar, otomatis menyarankan nonaktifkan)
+  // Hapus Kode Surat
   const handleDeleteJenis = async (jenisObj) => {
     const dipakaiCount = suratList.filter((s) => s.kode_jenis === jenisObj.kode).length;
     if (dipakaiCount > 0) {
       showToast(
-        `Kode "${jenisObj.kode}" sudah dipakai di ${dipakaiCount} surat keluar. Demi keamanan arsip, gunakan tombol Nonaktifkan (jangan dihapus).`,
+        `Kode "${jenisObj.kode}" sudah dipakai di ${dipakaiCount} surat keluar. Gunakan tombol Nonaktifkan.`,
         'error'
       );
       return;
@@ -465,7 +780,7 @@ export default function App() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  // Simpan Link Google Drive Arsip Scan PDF ke kolom file_arsip_path (0 MB Storage!)
+  // Simpan Link Google Drive Arsip Scan PDF
   const handleSaveDriveLink = async (e) => {
     e.preventDefault();
     if (!editingLinkRow) return;
@@ -494,6 +809,17 @@ export default function App() {
     }
   };
 
+  // Ambil nama pembuat untuk ditampilkan di Buku Agenda
+  const getNamaPembuatSurat = (s) => {
+    if (s.nama_pembuat) return s.nama_pembuat;
+    if (s.data_variabel?._pembuat) return s.data_variabel._pembuat;
+    if (s.dibuat_oleh) {
+      const found = stafList.find((st) => st.id === s.dibuat_oleh);
+      if (found) return found.nama_lengkap;
+    }
+    return 'Staf TU';
+  };
+
   // Filter daftar surat keluar
   const filteredSurat = useMemo(() => {
     return suratList.filter((s) => {
@@ -504,16 +830,231 @@ export default function App() {
         const matchNomor = s.nomor_surat_lengkap?.toLowerCase().includes(q);
         const matchPerihal = s.perihal?.toLowerCase().includes(q);
         const matchTujuan = s.tujuan?.toLowerCase().includes(q);
-        if (!matchNomor && !matchPerihal && !matchTujuan) return false;
+        const matchPembuat = getNamaPembuatSurat(s).toLowerCase().includes(q);
+        if (!matchNomor && !matchPerihal && !matchTujuan && !matchPembuat) return false;
       }
       return true;
     });
-  }, [suratList, filterTahun, filterJenis, searchQuery]);
+  }, [suratList, stafList, filterTahun, filterJenis, searchQuery]);
 
   const availableYears = useMemo(() => {
     const yrs = new Set(suratList.map((s) => s.tahun));
     return Array.from(yrs).sort((a, b) => b - a);
   }, [suratList]);
+
+  // =========================================================================
+  // TAMPILAN HALAMAN LOGIN (JIKA STAF BELUM LOGIN)
+  // =========================================================================
+  if (!authChecking && !currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col justify-center items-center p-4">
+        {toast && (
+          <div
+            className={`fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border text-sm font-medium ${
+              toast.type === 'error'
+                ? 'bg-red-50 border-red-200 text-red-800'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+            }`}
+          >
+            {toast.type === 'error' ? (
+              <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+            )}
+            <span>{toast.msg}</span>
+          </div>
+        )}
+
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 p-7">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-11 h-11 rounded-xl bg-sky-600 flex items-center justify-center text-white font-bold text-lg shadow-sm">
+              MN
+            </div>
+            <div>
+              <h1 className="font-bold text-base text-slate-900 leading-tight">
+                Sistem Penomoran & Arsip Surat
+              </h1>
+              <p className="text-xs text-slate-500">
+                SMK Maritim Nusantara Kupang
+              </p>
+            </div>
+          </div>
+
+          <div className="flex rounded-xl bg-slate-100 p-1 mb-5">
+            <button
+              type="button"
+              onClick={() => setAuthMode('login')}
+              className={`flex-1 py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                authMode === 'login'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              Masuk (Login Staf)
+            </button>
+            <button
+              type="button"
+              onClick={() => setAuthMode('register_first')}
+              className={`flex-1 py-2 text-xs font-semibold rounded-lg transition cursor-pointer ${
+                authMode === 'register_first'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              Daftar Akun Baru
+            </button>
+          </div>
+
+          <form onSubmit={handleAuthSubmit} className="space-y-4">
+            {authMode === 'register_first' && (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nama Lengkap Staf / Pemohon *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: Budi Santoso, S.Pd"
+                    value={loginNama}
+                    onChange={(e) => setLoginNama(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Jabatan / Bagian
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: Staf Tata Usaha / Waka Kurikulum"
+                    value={loginJabatan}
+                    onChange={(e) => setLoginJabatan(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+              </>
+            )}
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Email Staf *
+              </label>
+              <input
+                type="email"
+                placeholder="nama@smkmn.sch.id"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Password *
+              </label>
+              <input
+                type="password"
+                placeholder="Minimal 6 karakter"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                required
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={authLoading}
+              className="w-full flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white font-semibold py-2.5 px-4 rounded-xl text-sm shadow-xs transition cursor-pointer"
+            >
+              <Lock className="w-4 h-4" />
+              {authLoading
+                ? 'Memproses...'
+                : authMode === 'login'
+                ? 'Masuk ke Aplikasi'
+                : 'Buat Akun & Masuk'}
+            </button>
+          </form>
+
+          <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+            <span>
+              Status DB:{' '}
+              <strong className={isSupabaseConnected ? 'text-emerald-600' : 'text-amber-600'}>
+                {isSupabaseConnected ? 'Supabase Online' : 'Simulasi Lokal'}
+              </strong>
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowConfigModal(true)}
+              className="text-sky-600 hover:underline font-medium"
+            >
+              Atur Koneksi Supabase
+            </button>
+          </div>
+        </div>
+
+        {/* Modal Pengaturan Koneksi Supabase di Halaman Login */}
+        {showConfigModal && (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-bold text-base text-slate-900">
+                  Pengaturan Koneksi Supabase
+                </h3>
+                <button
+                  onClick={() => setShowConfigModal(false)}
+                  className="text-slate-400 hover:text-slate-600"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Supabase Project URL
+                  </label>
+                  <input
+                    type="url"
+                    placeholder="https://xxxx.supabase.co"
+                    value={sbUrl}
+                    onChange={(e) => setSbUrl(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Supabase Anon Public Key
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5c..."
+                    value={sbAnon}
+                    onChange={(e) => setSbAnon(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 mt-5">
+                <button
+                  onClick={() => {
+                    saveSupabaseConfig(sbUrl, sbAnon);
+                    setShowConfigModal(false);
+                    fetchAllData();
+                    showToast('Konfigurasi Supabase disimpan!');
+                  }}
+                  className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-semibold text-xs"
+                >
+                  Simpan & Hubungkan
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
@@ -552,26 +1093,51 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Badge Staf Aktif */}
+            {currentUser && (
+              <div className="flex items-center gap-2 bg-slate-800/90 border border-slate-700 px-3 py-1.5 rounded-lg text-xs">
+                <UserCheck className="w-3.5 h-3.5 text-sky-400" />
+                <span className="font-semibold text-slate-200">
+                  {currentUser.nama_lengkap}
+                </span>
+                <span className="text-slate-400 hidden sm:inline">
+                  ({currentUser.jabatan})
+                </span>
+              </div>
+            )}
+
             <button
               onClick={() => setShowConfigModal(true)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition ${
                 isSupabaseConnected
                   ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
                   : 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
               }`}
+              title="Pengaturan Database Supabase"
             >
               <Database className="w-3.5 h-3.5" />
-              {isSupabaseConnected ? 'Supabase Terhubung' : 'Mode Simulasi Lokal (Klik untuk Set Supabase)'}
+              <span className="hidden md:inline">
+                {isSupabaseConnected ? 'Supabase' : 'Simulasi'}
+              </span>
+            </button>
+
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 transition cursor-pointer"
+              title="Keluar (Logout)"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Keluar</span>
             </button>
           </div>
         </div>
 
         {/* Navigation Tabs */}
-        <div className="max-w-6xl mx-auto px-4 flex gap-1 border-t border-slate-800/80 pt-1">
+        <div className="max-w-6xl mx-auto px-4 flex flex-wrap gap-1 border-t border-slate-800/80 pt-1">
           <button
             onClick={() => setActiveTab('buat')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition cursor-pointer ${
               activeTab === 'buat'
                 ? 'border-sky-400 text-sky-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -582,7 +1148,7 @@ export default function App() {
           </button>
           <button
             onClick={() => setActiveTab('agenda')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition cursor-pointer ${
               activeTab === 'agenda'
                 ? 'border-sky-400 text-sky-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -593,7 +1159,7 @@ export default function App() {
           </button>
           <button
             onClick={() => setActiveTab('master')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition cursor-pointer ${
               activeTab === 'master'
                 ? 'border-sky-400 text-sky-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -601,6 +1167,17 @@ export default function App() {
           >
             <Settings className="w-4 h-4" />
             3. Master Kode & Template DOCX ({jenisList.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('staf')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition cursor-pointer ${
+              activeTab === 'staf'
+                ? 'border-sky-400 text-sky-400'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            4. Daftar Akun Staf ({stafList.length})
           </button>
         </div>
       </header>
@@ -612,13 +1189,18 @@ export default function App() {
         {/* ================================================================= */}
         {activeTab === 'buat' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Form Kiri */}
             <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-xs p-6">
               <div className="flex items-center justify-between mb-5">
                 <div>
                   <h2 className="text-lg font-bold text-slate-900">
                     Terbitkan Nomor Surat Baru
                   </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Diajukan oleh:{' '}
+                    <strong className="text-slate-700">
+                      {currentUser?.nama_lengkap} ({currentUser?.jabatan})
+                    </strong>
+                  </p>
                 </div>
                 <div className="text-right">
                   <span className="text-[11px] uppercase tracking-wider text-slate-400 block">
@@ -703,7 +1285,7 @@ export default function App() {
                         Isian Variabel Template Word ({selectedJenisObj?.kode})
                       </span>
                       <span className="text-[11px] text-slate-400">
-                        Oomatis mengisi tag {'{...}'} di file .docx
+                        Otomatis mengisi tag {'{...}'} di file .docx
                       </span>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200/80">
@@ -789,8 +1371,7 @@ export default function App() {
                       <strong>Tujuan:</strong> {lastCreatedSurat.tujuan}
                     </p>
                     <p>
-                      <strong>Semester / Bulan:</strong> Semester {lastCreatedSurat.semester} • Bulan{' '}
-                      {lastCreatedSurat.bulan_romawi} ({lastCreatedSurat.tahun})
+                      <strong>Dibuat Oleh:</strong> {getNamaPembuatSurat(lastCreatedSurat)}
                     </p>
                   </div>
                   <button
@@ -841,7 +1422,7 @@ export default function App() {
                   Buku Agenda Surat Keluar
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Arsip seluruh nomor surat yang telah diterbitkan beserta file Word (.docx).
+                  Arsip seluruh nomor surat beserta tracking staf pembuat & tautan Google Drive.
                 </p>
               </div>
 
@@ -850,10 +1431,10 @@ export default function App() {
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
-                    placeholder="Cari nomor, perihal, tujuan..."
+                    placeholder="Cari nomor, perihal, pembuat..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-sky-500 w-56"
+                    className="pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-sky-500 w-60"
                   />
                 </div>
 
@@ -906,6 +1487,7 @@ export default function App() {
                       <th className="py-3 px-3">Nomor Surat Lengkap</th>
                       <th className="py-3 px-3">Tanggal</th>
                       <th className="py-3 px-3">Perihal & Tujuan</th>
+                      <th className="py-3 px-3">Dibuat Oleh</th>
                       <th className="py-3 px-3 text-right">Draf Word & Arsip Drive</th>
                     </tr>
                   </thead>
@@ -946,6 +1528,12 @@ export default function App() {
                           <div className="text-xs text-slate-500">
                             Kepada: {s.tujuan}
                           </div>
+                        </td>
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 font-medium text-xs">
+                            <UserCheck className="w-3 h-3 text-sky-600" />
+                            {getNamaPembuatSurat(s)}
+                          </span>
                         </td>
                         <td className="py-3 px-3 text-right whitespace-nowrap">
                           <div className="inline-flex items-center gap-1.5">
@@ -1002,7 +1590,6 @@ export default function App() {
         {/* ================================================================= */}
         {activeTab === 'master' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Form Tambah / Edit Kode Surat */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 h-fit">
               <h3 className="text-base font-bold text-slate-900 mb-1">
                 {editingJenis ? `Edit Kode Surat (${editingJenis.kode})` : 'Tambah Kode Surat Baru'}
@@ -1081,7 +1668,6 @@ export default function App() {
               </form>
             </div>
 
-            {/* Tabel Master Jenis Surat & Upload DOCX */}
             <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-xs p-5">
               <div className="mb-4">
                 <h3 className="text-base font-bold text-slate-900">
@@ -1136,7 +1722,6 @@ export default function App() {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      {/* Tombol Unduh Contoh Template .docx */}
                       <button
                         onClick={() => downloadSampleTemplate(j)}
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs"
@@ -1146,7 +1731,6 @@ export default function App() {
                         Contoh .docx
                       </button>
 
-                      {/* Tombol Upload Template .docx */}
                       <label className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 font-medium text-xs cursor-pointer transition">
                         <Upload className="w-3.5 h-3.5" />
                         Upload Template .docx
@@ -1162,7 +1746,6 @@ export default function App() {
                         />
                       </label>
 
-                      {/* Edit */}
                       <button
                         onClick={() => {
                           setEditingJenis(j);
@@ -1176,7 +1759,6 @@ export default function App() {
                         <Edit3 className="w-3.5 h-3.5" />
                       </button>
 
-                      {/* Toggle Aktif/Nonaktif */}
                       <button
                         onClick={() => handleToggleAktifJenis(j)}
                         className={`p-1.5 rounded-lg border ${
@@ -1189,7 +1771,6 @@ export default function App() {
                         <Power className="w-3.5 h-3.5" />
                       </button>
 
-                      {/* Hapus */}
                       <button
                         onClick={() => handleDeleteJenis(j)}
                         className="p-1.5 rounded-lg border border-red-200 hover:bg-red-50 text-red-600"
@@ -1201,6 +1782,179 @@ export default function App() {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ================================================================= */}
+        {/* TAB 4: DAFTAR AKUN STAF (KELOLA USER PEMOHON SURAT)               */}
+        {/* ================================================================= */}
+        {activeTab === 'staf' && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Form Daftarkan Akun Staf Baru */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 h-fit">
+              <div className="flex items-center gap-2 mb-1">
+                <UserPlus className="w-4 h-4 text-sky-600" />
+                <h3 className="text-base font-bold text-slate-900">
+                  Daftarkan Akun Staf Baru
+                </h3>
+              </div>
+              <p className="text-xs text-slate-500 mb-4">
+                Buat akun login untuk staf Tata Usaha atau guru agar setiap pengajuan nomor surat tercatat atas nama mereka.
+              </p>
+
+              <form onSubmit={handleAddStafAccount} className="space-y-3.5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nama Lengkap & Gelar *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: Maria Fransiska, S.Kom"
+                    value={stafNama}
+                    onChange={(e) => setStafNama(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Jabatan / Unit Kerja *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: Staf Tata Usaha / Kaprodi Teknika"
+                    value={stafJabatan}
+                    onChange={(e) => setStafJabatan(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Email Login *
+                  </label>
+                  <input
+                    type="email"
+                    placeholder="maria@smkmn.sch.id"
+                    value={stafEmail}
+                    onChange={(e) => setStafEmail(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Password Awal *
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="Minimal 6 karakter"
+                    value={stafPassword}
+                    onChange={(e) => setStafPassword(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    required
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={stafSubmitting}
+                  className="w-full bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white font-semibold py-2.5 px-4 rounded-xl text-xs transition cursor-pointer"
+                >
+                  {stafSubmitting ? 'Mendaftarkan...' : '+ Buat Akun Staf'}
+                </button>
+              </form>
+            </div>
+
+            {/* Tabel Daftar Akun Staf & Statistik Surat */}
+            <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-xs p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Daftar Akun Staf Terdaftar
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Daftar pengguna yang memiliki akses login beserta jumlah surat yang telah diterbitkan.
+                  </p>
+                </div>
+                <button
+                  onClick={fetchAllData}
+                  className="p-2 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-600"
+                  title="Refresh"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </div>
+
+              {stafList.length === 0 ? (
+                <div className="text-center py-10 text-slate-400 text-sm">
+                  Belum ada profil staf terdaftar.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-[11px] uppercase tracking-wider text-slate-400">
+                        <th className="py-3 px-3">Nama Staf</th>
+                        <th className="py-3 px-3">Jabatan</th>
+                        <th className="py-3 px-3">Email Login</th>
+                        <th className="py-3 px-3 text-center">Surat Diterbitkan</th>
+                        <th className="py-3 px-3 text-right">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-sm">
+                      {stafList.map((st) => {
+                        const countSurat = suratList.filter(
+                          (s) =>
+                            s.dibuat_oleh === st.id ||
+                            getNamaPembuatSurat(s).toLowerCase() ===
+                              st.nama_lengkap?.toLowerCase()
+                        ).length;
+                        const isMe = st.id === currentUser?.id;
+
+                        return (
+                          <tr key={st.id} className="hover:bg-slate-50/80">
+                            <td className="py-3 px-3 font-semibold text-slate-900 text-xs">
+                              {st.nama_lengkap}
+                              {isMe && (
+                                <span className="ml-2 text-[10px] bg-sky-100 text-sky-700 px-2 py-0.5 rounded-full font-bold">
+                                  Anda
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-3 text-xs text-slate-600">
+                              {st.jabatan}
+                            </td>
+                            <td className="py-3 px-3 font-mono text-xs text-slate-500">
+                              {st.email}
+                            </td>
+                            <td className="py-3 px-3 text-center">
+                              <span className="inline-block font-mono font-bold text-xs bg-slate-100 text-slate-800 px-2.5 py-0.5 rounded-full">
+                                {countSurat} surat
+                              </span>
+                            </td>
+                            <td className="py-3 px-3 text-right">
+                              {!isMe && (
+                                <button
+                                  onClick={() => handleDeleteStaf(st)}
+                                  className="p-1.5 rounded-lg border border-red-200 hover:bg-red-50 text-red-600"
+                                  title="Hapus dari daftar staf"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -1,6 +1,4 @@
-// Data & fungsi simulasi lokal (LocalStorage + IndexedDB untuk template .docx)
-// Berfungsi otomatis jika user belum memasukkan SUPABASE_URL di localhost,
-// dan mengimplementasikan logika penomoran yang 100% identik dengan trigger PostgreSQL!
+// Data & fungsi simulasi lokal (LocalStorage)
 
 const INITIAL_JENIS = [
   { id: '1', kode: 'SPm', nama_jenis: 'Surat Permohonan', template_path: 'sample:SPm', variabel_template: ['nama_taruna', 'nis', 'jurusan', 'keterangan'], aktif: true },
@@ -12,9 +10,19 @@ const INITIAL_JENIS = [
   { id: '7', kode: 'MoU', nama_jenis: 'Nota Kesepahaman / Kerja Sama', template_path: 'sample:MoU', variabel_template: ['nama_taruna', 'nis', 'jurusan', 'keterangan'], aktif: true },
 ];
 
+const INITIAL_STAF = [
+  {
+    id: 'local-admin-1',
+    email: 'admin@smkmn.sch.id',
+    nama_lengkap: 'Admin Tata Usaha',
+    jabatan: 'Kepala Tata Usaha',
+    aktif: true,
+    created_at: new Date().toISOString(),
+  },
+];
+
 const ROMAWI = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
 
-// Simpan binary template .docx di memory / IndexedDB sederhana untuk mode simulasi lokal
 const localBinaryTemplates = new Map();
 
 export function setLocalTemplateBinary(kode, arrayBuffer) {
@@ -48,10 +56,23 @@ export function saveLocalSurat(list) {
   localStorage.setItem('smk_mn_surat_keluar', JSON.stringify(list));
 }
 
+export function loadLocalStaf() {
+  const raw = localStorage.getItem('smk_mn_profil_staf');
+  if (!raw) {
+    localStorage.setItem('smk_mn_profil_staf', JSON.stringify(INITIAL_STAF));
+    return INITIAL_STAF;
+  }
+  return JSON.parse(raw);
+}
+
+export function saveLocalStaf(list) {
+  localStorage.setItem('smk_mn_profil_staf', JSON.stringify(list));
+}
+
 /**
  * Replika 1:1 dari Trigger PostgreSQL generate_nomor_surat_otomatis()
  */
-export function simulatePostgresInsertSurat({ kode_jenis, tanggal_surat, perihal, tujuan, data_variabel }) {
+export function simulatePostgresInsertSurat({ kode_jenis, tanggal_surat, perihal, tujuan, data_variabel, nama_pembuat }) {
   const list = loadLocalSurat();
   const [y, m] = tanggal_surat.split('-').map(Number);
   const v_tahun = y;
@@ -79,6 +100,7 @@ export function simulatePostgresInsertSurat({ kode_jenis, tanggal_surat, perihal
     tujuan,
     data_variabel: data_variabel || {},
     file_arsip_path: null,
+    nama_pembuat: nama_pembuat || 'Staf TU',
     created_at: new Date().toISOString(),
   };
 
